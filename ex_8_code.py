@@ -8,9 +8,9 @@ from torch.utils.data.sampler import SubsetRandomSampler
 from torchvision import datasets, transforms
 
 xViector = range(1, 11)
-lossTestViector = {'regular': [], 'norm': [], 'drop': []}
-lossValidViector = {'regular': [], 'norm': [], 'drop': []}
-lossTrainViector = {'regular': [], 'norm': [], 'drop': []}
+lossTestViector = {'regular': [], 'norm': [], 'drop': [], 'cnn': []}
+lossValidViector = {'regular': [], 'norm': [], 'drop': [], 'cnn': []}
+lossTrainViector = {'regular': [], 'norm': [], 'drop': [], 'cnn': []}
 batchSize = 4
 
 transforms = transforms.Compose([
@@ -28,27 +28,46 @@ train_sampler = SubsetRandomSampler(train_idx)
 valid_sampler = SubsetRandomSampler(valid_idx)
 
 train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batchSize, sampler=train_sampler)
-valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batchSize, sampler=valid_sampler)
-test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batchSize, shuffle=True)
+valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=1, sampler=valid_sampler)
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 
 class FirstNet(nn.Module):
-    def __init__(self, image_size, batch_norm=False, drop=False):
+    def __init__(self, image_size, batch_norm=False, drop=False, cnn=False):
         super(FirstNet, self).__init__()
         self.image_size = image_size
 
         self.batch_norm = batch_norm
         self.drop = drop
+        self.cnn = cnn
         self.bn0 = nn.BatchNorm1d(100)
         self.bn1 = nn.BatchNorm1d(50)
         self.do = nn.Dropout(p=0.25)
+
+        self.layer1 = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.layer2 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=5, stride=1, padding=2),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=1))
+        self.layer3 = nn.Sequential(
+            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=2),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2))
+        self.fc_cnn = nn.Linear(7 * 7 * 32, 10)
 
         self.fc0 = nn.Linear(image_size, 100)
         self.fc1 = nn.Linear(100, 50)
         self.fc2 = nn.Linear(50, 10)
 
     def forward(self, x):
-        x = x.view(-1, self.image_size)
+        if not self.cnn:
+            x = x.view(-1, self.image_size)
 
         if self.batch_norm:
             x = F.relu(self.bn0(self.fc0(x)))
@@ -56,6 +75,13 @@ class FirstNet(nn.Module):
         elif self.drop:
             x = F.relu(self.do(self.fc0(x)))
             x = F.relu(self.do(self.fc1(x)))
+        elif self.cnn:
+            x = self.layer1(x)
+            x = self.layer2(x)
+            x = self.layer3(x)
+            x = x.reshape(x.size(0), -1)
+            x = self.fc_cnn(x)
+            return F.log_softmax(x, dim=1)
         else:
             x = F.relu(self.fc0(x))
             x = F.relu(self.fc1(x))
@@ -101,10 +127,10 @@ def test_valid(model, name):
         valid_loss += F.nll_loss(output, target, size_average=False).item()
         pred = output.data.max(1, keepdim=True)[1]
         correct += pred.eq(target.data.view_as(pred)).cpu().sum()
-    valid_loss /= len(valid_loader) * batchSize
+    valid_loss /= len(valid_loader) * 1
     print('Valid set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)'.format(
-        valid_loss, correct, len(valid_loader) * batchSize,
-                             100. * correct / (len(valid_loader) * batchSize)))
+        valid_loss, correct, len(valid_loader) * 1,
+                             100. * correct / (len(valid_loader) * 1)))
     lossValidViector[name].append(valid_loss)
 
 
@@ -143,14 +169,17 @@ def run_model(model, optimize, name):
                 optimize = optim.SGD(model.parameters(), lr=0.005)
 
 
-def init_model(learning, batch, norm, drop, name):
+def init_model(learning, batch, norm, drop, name, cnn=False):
     global train_loader, valid_loader, test_loader, batchSize
     batchSize = batch
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch, sampler=train_sampler)
-    valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch, sampler=valid_sampler)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch, shuffle=True)
-    model = FirstNet(image_size=28 * 28, batch_norm=norm, drop=drop)
-    optimizer = optim.SGD(model.parameters(), lr=learning)
+    valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=1, sampler=valid_sampler)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=True)
+    model = FirstNet(image_size=28 * 28, batch_norm=norm, drop=drop, cnn=cnn)
+    if cnn:
+        optimizer = optim.Adam(model.parameters(), lr=learning)
+    else:
+        optimizer = optim.SGD(model.parameters(), lr=learning)
     return model, optimizer
 
 
@@ -159,40 +188,35 @@ def write_result(model):
     with open('test.pred', 'w') as the_file:
         for data, target in test_loader:
             output = model(data)
-            pred = output.data.max(1, keepdim=True)[1]
             pre_index = np.argmax(output.cpu().data.numpy())
             the_file.writelines(str(pre_index) + '\n')
+
+
+def foo():
+    with open('real.pred', 'w') as the_real:
+        for data, target in test_loader:
+            the_real.writelines(str(target.cpu().data.numpy()) + '\n')
 
 
 def iterate_all_models():
     global train_loader, valid_loader, test_loader
 
-    print '--------------------------------- model: A ------------------------------' + '\n'
+    model, optimizer = init_model(0.01, 64, False, False, 'cnn', True)
+    run_model(model, optimizer, 'cnn')
+    foo()
+    write_result(model)
+
     model, optimizer = init_model(0.009, 1, False, False, 'regular')
     run_model(model, optimizer, 'regular')
-    write_result(model)
-    print '--------------------------------- model: batch ------------------------------' + '\n'
+
     model, optimizer = init_model(0.015, 6, True, False, 'norm')
     run_model(model, optimizer, 'norm')
 
-    print '---------------------------------- model: drop ------------------------------' + '\n'
     model, optimizer = init_model(0.015, 6, False, True, 'drop')
     run_model(model, optimizer, 'drop')
 
-
-# def plot(name):
-#     global xViector, lossTrainViector, lossValidViector
-#     plt.plot(xViector, lossValidViector[name], "r", label='Model')
-#     plt.plot(xViector, lossTrainViector[name], "b--", label='Real')
-#     plt.legend(('epoch', 'loss'))
-#     plt.show()
-
-
 def main():
     iterate_all_models()
-    # plot('regular')
-    # plot('norm')
-    # plot('drop')
 
 
 if __name__ == "__main__":
